@@ -16,7 +16,7 @@ impl TryFrom<Blob> for Page {
         if value.len() > page.0.len() {
             return Err(anyhow!("Blob larger than page!"));
         }
-        page.0.copy_from_slice(&value);
+        page.0[..value.len()].copy_from_slice(&value);
         Ok(page)
     }
 }
@@ -130,6 +130,15 @@ enum Node {
     Leaf(Leaf),
 }
 
+const DAFTAR_SQL_MAGIC: u64 = 0xfedcba;
+
+#[derive(Debug, Clone, Encode, Decode)]
+struct Metadata {
+    pub magic: u64,
+    pub version: u64,
+    pub root_node: u64,
+}
+
 impl TryInto<Page> for Node {
     type Error = anyhow::Error;
     fn try_into(self) -> Result<Page, Self::Error> {
@@ -152,6 +161,47 @@ struct KvStore<S: Storage> {
 }
 
 impl<S: Storage> KvStore<S> {
+    fn init(&mut self) -> Result<(), anyhow::Error> {
+        if self.metadata().is_ok() {
+            return Err(anyhow!("Already initialized!"));
+        }
+        let mut page_0 = Page::default();
+        let metadata_ser = bincode::encode_to_vec(
+            &Metadata {
+                magic: DAFTAR_SQL_MAGIC,
+                version: 1,
+                root_node: 1,
+            },
+            bincode::config::standard(),
+        )?;
+        page_0.0[..metadata_ser.len()].copy_from_slice(&metadata_ser);
+        self.storage.set_pages(vec![
+            (0, page_0),
+            (
+                1,
+                Node::Leaf(Leaf {
+                    keys: vec![],
+                    values: vec![],
+                    next: None,
+                })
+                .try_into()?,
+            ),
+        ])?;
+        Ok(())
+    }
+    fn metadata(&self) -> Result<Metadata, anyhow::Error> {
+        let page_0 = self
+            .storage
+            .get_page(0)?
+            .ok_or(anyhow!("Metadata unavailable!"))?;
+        let (metadata, _): (Metadata, _) =
+            bincode::decode_from_slice(&page_0.0, bincode::config::standard())?;
+        if metadata.magic != DAFTAR_SQL_MAGIC {
+            return Err(anyhow!("Invalid magic number!"));
+        }
+        Ok(metadata)
+    }
+
     fn get_node(&self, node_id: u64) -> Result<Option<Node>, anyhow::Error> {
         if let Some(page) = self.storage.get_page(node_id)? {
             Ok(Some(page.try_into()?))
@@ -160,10 +210,10 @@ impl<S: Storage> KvStore<S> {
         }
     }
 
-    fn find_leaf(&self, key: &Blob, node_id: u64) -> Result<Option<Leaf>, anyhow::Error> {
+    fn find_leaf(&self, key: &Blob, node_id: u64) -> Result<Option<(u64, Leaf)>, anyhow::Error> {
         let node = self.get_node(node_id)?;
         Ok(match node {
-            Some(Node::Leaf(leaf)) => Some(leaf),
+            Some(Node::Leaf(leaf)) => Some((node_id, leaf)),
             Some(Node::Internal(internal)) => {
                 for i in 0..internal.keys.len() {
                     if key <= &internal.keys[i] {
@@ -177,11 +227,31 @@ impl<S: Storage> KvStore<S> {
     }
 
     fn insert(&mut self, pairs: Vec<(Blob, Blob)>) -> Result<(), anyhow::Error> {
-        unimplemented!()
+        let root_id = self.metadata()?.root_node;
+        let mut fork = self.fork_mut();
+        for (k, v) in pairs {
+            let (node_id, mut leaf) = fork
+                .find_leaf(&k, root_id)?
+                .ok_or(anyhow!("Leaf not found!"))?;
+            match leaf.keys.binary_search(&k) {
+                Ok(idx) => {
+                    leaf.values[idx] = v;
+                }
+                Err(idx) => {
+                    leaf.keys.insert(idx, k);
+                    leaf.values.insert(idx, v);
+                }
+            }
+            fork.storage
+                .set_pages(vec![(node_id, Node::Leaf(leaf).try_into()?)])?;
+        }
+        fork.storage.commit()?;
+        Ok(())
     }
 
     fn get(&self, key: &Blob) -> Result<Option<Blob>, anyhow::Error> {
-        Ok(if let Some(leaf) = self.find_leaf(key, 0)? {
+        let root_id = self.metadata()?.root_node;
+        Ok(if let Some((_, leaf)) = self.find_leaf(key, root_id)? {
             if let Ok(idx) = leaf.keys.binary_search(key) {
                 Some(leaf.values[idx].clone())
             } else {
@@ -205,30 +275,22 @@ impl<S: Storage> KvStore<S> {
 
 fn main() -> Result<(), anyhow::Error> {
     let storage = RamStorage::default();
-    let mut forked = storage.fork();
+    let mut db = KvStore { storage };
+    db.init()?;
+    db.insert(vec![
+        (b"f".into(), b"fff".into()),
+        (b"a".into(), b"aaa".into()),
+        (b"2".into(), b"222".into()),
+        (b"5".into(), b"555".into()),
+        (b"4".into(), b"444".into()),
+        (b"1".into(), b"111".into()),
+        (b"3".into(), b"333".into()),
+        (b"d".into(), b"ddd".into()),
+    ])?;
 
-    let mut tx_1 = forked.fork_mut();
-    tx_1.set_pages(vec![(0, Page::default())])?;
-    tx_1.set_pages(vec![(1, Page::default())])?;
-    tx_1.set_pages(vec![(2, Page::default())])?;
-    tx_1.commit()?; // All at once
+    println!("{:?}", db.get_node(1)?);
 
-    let mut tx_2 = forked.fork_mut();
-    tx_2.set_pages(vec![(0, Page::default())])?;
-    tx_2.set_pages(vec![(1, Page::default())])?;
-    tx_2.set_pages(vec![(2, Page::default())])?;
-    tx_2.commit()?; // All at once
-
-    println!("{:?}", forked.fork().get_page(0)?);
-
-    let mut storage = KvStore {
-        storage: forked.fork(),
-    };
-    storage.insert(vec![])?;
-
-    storage.fork_mut().fork_mut().fork_mut().fork_mut();
-
-    println!("Hello, world!");
+    //println!("{:?}", db.get(&b"5".into())?);
 
     Ok(())
 }
