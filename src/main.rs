@@ -3,7 +3,7 @@ use std::{collections::HashMap, error::Error, path::PathBuf};
 use anyhow::anyhow;
 use bincode::{Decode, Encode};
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 struct GenericPage<const SZ: usize>([u8; SZ]);
 
 type Blob = Vec<u8>;
@@ -28,7 +28,7 @@ impl Default for Page {
 }
 
 trait Storage: Sized {
-    fn get_page(&self, idx: u64) -> Result<Page, anyhow::Error>;
+    fn get_page(&self, idx: u64) -> Result<Option<Page>, anyhow::Error>;
     fn set_pages(&mut self, pages: Vec<(u64, Page)>) -> Result<(), anyhow::Error>;
     fn fork(&self) -> OverwrittenStorage<'_, Self> {
         OverwrittenStorage {
@@ -48,8 +48,8 @@ trait Storage: Sized {
 struct RamStorage(HashMap<u64, Page>);
 
 impl Storage for RamStorage {
-    fn get_page(&self, idx: u64) -> Result<Page, anyhow::Error> {
-        Ok(self.0.get(&idx).cloned().unwrap_or_default())
+    fn get_page(&self, idx: u64) -> Result<Option<Page>, anyhow::Error> {
+        Ok(self.0.get(&idx).cloned())
     }
     fn set_pages(&mut self, pages: Vec<(u64, Page)>) -> Result<(), anyhow::Error> {
         for (idx, page) in pages {
@@ -66,9 +66,9 @@ struct OverwrittenStorage<'a, S: Storage> {
 }
 
 impl<'a, S: Storage> Storage for OverwrittenStorage<'a, S> {
-    fn get_page(&self, idx: u64) -> Result<Page, anyhow::Error> {
+    fn get_page(&self, idx: u64) -> Result<Option<Page>, anyhow::Error> {
         if let Some(overwrite) = self.overwrite.get(&idx) {
-            Ok(overwrite.clone())
+            Ok(Some(overwrite.clone()))
         } else {
             self.base.get_page(idx)
         }
@@ -96,9 +96,9 @@ impl<'a, S: Storage> OverwrittenStorageMut<'a, S> {
 }
 
 impl<'a, S: Storage> Storage for OverwrittenStorageMut<'a, S> {
-    fn get_page(&self, idx: u64) -> Result<Page, anyhow::Error> {
+    fn get_page(&self, idx: u64) -> Result<Option<Page>, anyhow::Error> {
         if let Some(overwrite) = self.overwrite.get(&idx) {
-            Ok(overwrite.clone())
+            Ok(Some(overwrite.clone()))
         } else {
             self.base.get_page(idx)
         }
@@ -112,16 +112,22 @@ impl<'a, S: Storage> Storage for OverwrittenStorageMut<'a, S> {
 }
 
 #[derive(Debug, Clone, Encode, Decode)]
+pub struct Leaf {
+    keys: Vec<Blob>,
+    values: Vec<Blob>,
+    next: Option<u64>,
+}
+
+#[derive(Debug, Clone, Encode, Decode)]
+pub struct Internal {
+    keys: Vec<Blob>,
+    children: Vec<u64>,
+}
+
+#[derive(Debug, Clone, Encode, Decode)]
 enum Node {
-    Internal {
-        keys: Vec<Blob>,
-        children: Vec<u64>,
-    },
-    Leaf {
-        keys: Vec<Blob>,
-        values: Vec<Blob>,
-        next: Option<u64>,
-    },
+    Internal(Internal),
+    Leaf(Leaf),
 }
 
 impl TryInto<Page> for Node {
@@ -146,59 +152,44 @@ struct KvStore<S: Storage> {
 }
 
 impl<S: Storage> KvStore<S> {
-    fn insert(&mut self, pairs: Vec<(Blob, Blob)>) -> Result<(), anyhow::Error> {
-        // Try to load the root.
-        let root_page = self.storage.get_page(0)?;
-
-        // If the page is all zeros, initialize it as an empty leaf.
-        let mut root = Node::try_from(root_page).unwrap_or(Node::Leaf {
-            keys: Vec::new(),
-            values: Vec::new(),
-            next: None,
-        });
-
-        match &mut root {
-            Node::Leaf { keys, values, .. } => {
-                for (key, value) in pairs {
-                    match keys.binary_search(&key) {
-                        // Replace existing value.
-                        Ok(idx) => values[idx] = value,
-
-                        // Insert while maintaining sorted order.
-                        Err(idx) => {
-                            keys.insert(idx, key);
-                            values.insert(idx, value);
-                        }
-                    }
-                }
-            }
-
-            Node::Internal { .. } => {
-                anyhow::bail!("internal nodes are not implemented yet");
-            }
+    fn get_node(&self, node_id: u64) -> Result<Option<Node>, anyhow::Error> {
+        if let Some(page) = self.storage.get_page(node_id)? {
+            Ok(Some(page.try_into()?))
+        } else {
+            Ok(None)
         }
-
-        let page: Page = root.try_into()?;
-        self.storage.set_pages(vec![(0, page)])?;
-
-        Ok(())
     }
 
-    fn get(&self, key: &Blob) -> Result<Blob, anyhow::Error> {
-        let root_page = self.storage.get_page(0)?;
-
-        let root = Node::try_from(root_page)?;
-
-        match root {
-            Node::Leaf { keys, values, .. } => match keys.binary_search(key) {
-                Ok(idx) => Ok(values[idx].clone()),
-                Err(_) => anyhow::bail!("key not found"),
-            },
-
-            Node::Internal { .. } => {
-                anyhow::bail!("internal nodes are not implemented yet");
+    fn find_leaf(&self, key: &Blob, node_id: u64) -> Result<Option<Leaf>, anyhow::Error> {
+        let node = self.get_node(node_id)?;
+        Ok(match node {
+            Some(Node::Leaf(leaf)) => Some(leaf),
+            Some(Node::Internal(internal)) => {
+                for i in 0..internal.keys.len() {
+                    if key <= &internal.keys[i] {
+                        return self.find_leaf(key, internal.children[i]);
+                    }
+                }
+                return self.find_leaf(key, internal.children[internal.keys.len()]);
             }
-        }
+            None => None,
+        })
+    }
+
+    fn insert(&mut self, pairs: Vec<(Blob, Blob)>) -> Result<(), anyhow::Error> {
+        unimplemented!()
+    }
+
+    fn get(&self, key: &Blob) -> Result<Option<Blob>, anyhow::Error> {
+        Ok(if let Some(leaf) = self.find_leaf(key, 0)? {
+            if let Ok(idx) = leaf.keys.binary_search(key) {
+                Some(leaf.values[idx].clone())
+            } else {
+                None
+            }
+        } else {
+            None
+        })
     }
     fn fork(&self) -> KvStore<OverwrittenStorage<'_, S>> {
         KvStore {
