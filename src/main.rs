@@ -12,11 +12,12 @@ type Page = GenericPage<8192>;
 impl TryFrom<Blob> for Page {
     type Error = anyhow::Error;
     fn try_from(value: Blob) -> Result<Self, Self::Error> {
-        Ok(Self(
-            value
-                .try_into()
-                .map_err(|_| anyhow!("Blob does not fit into a page"))?,
-        ))
+        let mut page = Page::default();
+        if value.len() > page.0.len() {
+            return Err(anyhow!("Blob larger than page!"));
+        }
+        page.0.copy_from_slice(&value);
+        Ok(page)
     }
 }
 
