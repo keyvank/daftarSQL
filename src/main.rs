@@ -87,14 +87,10 @@ struct OverwrittenStorageMut<'a, S: Storage> {
 }
 
 impl<'a, S: Storage> OverwrittenStorageMut<'a, S> {
-    pub fn commit(&mut self) -> Result<(), anyhow::Error> {
-        let res = self
-            .base
-            .set_pages(self.overwrite.clone().into_iter().collect());
-        if res.is_ok() {
-            self.overwrite.clear();
-        }
-        res
+    pub fn commit(self) -> Result<(), anyhow::Error> {
+        self.base
+            .set_pages(self.overwrite.clone().into_iter().collect())?;
+        Ok(())
     }
 }
 
@@ -218,19 +214,28 @@ impl<S: Storage> KvStore<S> {
 fn main() -> Result<(), anyhow::Error> {
     let storage = RamStorage::default();
     let mut forked = storage.fork();
-    let mut forked2 = forked.fork_mut();
 
-    forked2.set_pages(vec![(0, Page::default())])?;
+    let mut tx_1 = forked.fork_mut();
+    tx_1.set_pages(vec![(0, Page::default())])?;
+    tx_1.set_pages(vec![(1, Page::default())])?;
+    tx_1.set_pages(vec![(2, Page::default())])?;
+    tx_1.commit()?; // All at once
 
-    forked2.commit()?;
+    let mut tx_2 = forked.fork_mut();
+    tx_2.set_pages(vec![(0, Page::default())])?;
+    tx_2.set_pages(vec![(1, Page::default())])?;
+    tx_2.set_pages(vec![(2, Page::default())])?;
+    tx_2.commit()?; // All at once
 
-    println!("{:?}", forked2.get_page(0)?);
+    println!("{:?}", forked.fork().get_page(0)?);
 
-    let mut storage = KvStore { storage: forked2 };
+    let mut storage = KvStore {
+        storage: forked.fork(),
+    };
     storage.insert(vec![])?;
 
     storage.fork_mut().fork_mut().fork_mut().fork_mut();
-    
+
     println!("Hello, world!");
 
     Ok(())
