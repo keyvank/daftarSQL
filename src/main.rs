@@ -1,9 +1,7 @@
 use std::{
     collections::HashMap,
-    error::Error,
     fs::{File, OpenOptions},
     io::SeekFrom,
-    path::PathBuf,
 };
 
 use anyhow::anyhow;
@@ -14,18 +12,6 @@ struct GenericPage<const SZ: usize>([u8; SZ]);
 
 type Blob = Vec<u8>;
 type Page = GenericPage<8192>;
-
-impl TryFrom<Blob> for Page {
-    type Error = anyhow::Error;
-    fn try_from(value: Blob) -> Result<Self, Self::Error> {
-        let mut page = Page::default();
-        if value.len() > page.0.len() {
-            return Err(anyhow!("Blob larger than page!"));
-        }
-        page.0[..value.len()].copy_from_slice(&value);
-        Ok(page)
-    }
-}
 
 impl Default for Page {
     fn default() -> Self {
