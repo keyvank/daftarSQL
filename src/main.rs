@@ -210,11 +210,11 @@ impl<S: Storage> KvStore<S> {
         }
     }
 
-    fn find_leaf(&self, key: &Blob, node_id: u64) -> Result<Option<(u64, Leaf)>, anyhow::Error> {
-        let node = self.get_node(node_id)?;
+    fn find_leaf(&self, key: &Blob, node_id: u64) -> Result<(u64, Leaf), anyhow::Error> {
+        let node = self.get_node(node_id)?.ok_or(anyhow!("Node not found!"))?;
         Ok(match node {
-            Some(Node::Leaf(leaf)) => Some((node_id, leaf)),
-            Some(Node::Internal(internal)) => {
+            Node::Leaf(leaf) => (node_id, leaf),
+            Node::Internal(internal) => {
                 for i in 0..internal.keys.len() {
                     if key <= &internal.keys[i] {
                         return self.find_leaf(key, internal.children[i]);
@@ -222,7 +222,6 @@ impl<S: Storage> KvStore<S> {
                 }
                 return self.find_leaf(key, internal.children[internal.keys.len()]);
             }
-            None => None,
         })
     }
 
@@ -230,9 +229,7 @@ impl<S: Storage> KvStore<S> {
         let root_id = self.metadata()?.root_node;
         let mut fork = self.fork_mut();
         for (k, v) in pairs {
-            let (node_id, mut leaf) = fork
-                .find_leaf(&k, root_id)?
-                .ok_or(anyhow!("Leaf not found!"))?;
+            let (node_id, mut leaf) = fork.find_leaf(&k, root_id)?;
             match leaf.keys.binary_search(&k) {
                 Ok(idx) => {
                     leaf.values[idx] = v;
@@ -251,12 +248,9 @@ impl<S: Storage> KvStore<S> {
 
     fn get(&self, key: &Blob) -> Result<Option<Blob>, anyhow::Error> {
         let root_id = self.metadata()?.root_node;
-        Ok(if let Some((_, leaf)) = self.find_leaf(key, root_id)? {
-            if let Ok(idx) = leaf.keys.binary_search(key) {
-                Some(leaf.values[idx].clone())
-            } else {
-                None
-            }
+        let (_, leaf) = self.find_leaf(key, root_id)?;
+        Ok(if let Ok(idx) = leaf.keys.binary_search(key) {
+            Some(leaf.values[idx].clone())
         } else {
             None
         })
@@ -277,6 +271,7 @@ fn main() -> Result<(), anyhow::Error> {
     let storage = RamStorage::default();
     let mut db = KvStore { storage };
     db.init()?;
+
     db.insert(vec![
         (b"f".into(), b"fff".into()),
         (b"a".into(), b"aaa".into()),
