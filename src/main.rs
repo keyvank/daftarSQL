@@ -437,6 +437,26 @@ mod tests {
     }
 }
 
+fn db_map<S: Storage>(db: &KvStore<S>) -> Result<(), anyhow::Error> {
+    for i in 0..db.storage.len()? {
+        let page = db.get_page_content(i)?;
+        println!(
+            "#{}: {}",
+            i,
+            match page {
+                PageContent::Free(_) => "Free",
+                PageContent::Ready => "Ready",
+                PageContent::Metadata(_) => "Metadata",
+                PageContent::Node(node) => match node {
+                    Node::Internal(..) => "Node(Internal)",
+                    Node::Leaf(..) => "Node(Leaf)",
+                },
+            }
+        );
+    }
+    Ok(())
+}
+
 fn main() -> Result<(), anyhow::Error> {
     let storage = FileStorage {
         0: OpenOptions::new()
@@ -457,6 +477,9 @@ fn main() -> Result<(), anyhow::Error> {
         (b"3".into(), b"333".into()),
         (b"d".into(), b"ddd".into()),
     ])?;
+    db.alloc_page()?;
+
+    db_map(&db)?;
 
     println!("{:?}", db.get_node(1)?);
 
