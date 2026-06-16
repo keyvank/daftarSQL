@@ -1,4 +1,10 @@
-use std::{collections::HashMap, error::Error, path::PathBuf};
+use std::{
+    collections::HashMap,
+    error::Error,
+    fs::{File, OpenOptions},
+    io::SeekFrom,
+    path::PathBuf,
+};
 
 use anyhow::anyhow;
 use bincode::{Decode, Encode};
@@ -55,6 +61,32 @@ impl Storage for RamStorage {
         for (idx, page) in pages {
             self.0.insert(idx, page);
         }
+        Ok(())
+    }
+}
+
+#[derive(Debug)]
+struct FileStorage(File);
+use std::io::{Read, Seek, Write};
+
+impl Storage for FileStorage {
+    fn get_page(&self, idx: u64) -> Result<Option<Page>, anyhow::Error> {
+        let mut file = &self.0;
+        let offset = idx * 8192;
+        let mut page = Page::default();
+        file.seek(SeekFrom::Start(offset))?;
+        let n = file.read(&mut page.0)?;
+        if n == 0 {
+            return Ok(None);
+        }
+        Ok(Some(page))
+    }
+    fn set_pages(&mut self, pages: Vec<(u64, Page)>) -> Result<(), anyhow::Error> {
+        for (idx, page) in pages {
+            self.0.seek(SeekFrom::Start(idx * 8192))?;
+            self.0.write_all(&page.0)?;
+        }
+        self.0.flush()?;
         Ok(())
     }
 }
@@ -362,10 +394,15 @@ impl<S: Storage> KvStore<S> {
 }
 
 fn main() -> Result<(), anyhow::Error> {
-    let storage = RamStorage::default();
+    let storage = FileStorage {
+        0: OpenOptions::new()
+            .write(true)
+            .read(true)
+            .create(true)
+            .open("data.db")?,
+    };
     let mut db = KvStore { storage };
     db.init()?;
-
     db.insert(vec![
         (b"f".into(), b"fff".into()),
         (b"a".into(), b"aaa".into()),
