@@ -177,12 +177,14 @@ pub struct Internal {
     children: Vec<u64>,
 }
 
+// B+ Tree nodes
 #[derive(Debug, Clone, Encode, Decode)]
 enum Node {
     Internal(Internal),
     Leaf(Leaf),
 }
 
+// Free pages form a circular linked list
 #[derive(Debug, Clone, Encode, Decode)]
 struct Free {
     prev_free_page_id: u64,
@@ -191,10 +193,10 @@ struct Free {
 
 #[derive(Debug, Clone, Encode, Decode)]
 enum PageContent {
-    Ready,
-    Free(Free),
-    Metadata(Metadata),
-    Node(Node),
+    Ready,              // Page is no longer free but empty and ready to be used
+    Free(Free),         // Page is marked as free and can be allocated again
+    Metadata(Metadata), // Resides in page #0 and contains DB metadata
+    Node(Node),         // Internal and leaf B+Tree nodes
 }
 
 const DAFTAR_SQL_MAGIC: u64 = 0xfedcba;
