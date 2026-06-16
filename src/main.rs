@@ -313,9 +313,9 @@ impl<S: Storage> KvStore<S> {
         }
     }
 
-    fn init(&mut self) -> Result<(), anyhow::Error> {
+    fn init(&mut self) -> Result<bool, anyhow::Error> {
         if self.metadata().is_ok() {
-            return Err(anyhow!("Already initialized!"));
+            return Ok(false);
         }
         self.set_page_content(
             0,
@@ -335,7 +335,7 @@ impl<S: Storage> KvStore<S> {
                 next: None,
             })),
         )?;
-        Ok(())
+        Ok(true)
     }
 
     fn metadata(&self) -> Result<Metadata, anyhow::Error> {
