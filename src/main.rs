@@ -36,6 +36,7 @@ impl Default for Page {
 trait Storage: Sized {
     fn get_page(&self, idx: u64) -> Result<Option<Page>, anyhow::Error>;
     fn set_pages(&mut self, pages: Vec<(u64, Page)>) -> Result<(), anyhow::Error>;
+    fn len(&self) -> Result<u64, anyhow::Error>;
     fn fork(&self) -> OverwrittenStorage<'_, Self> {
         OverwrittenStorage {
             base: self,
@@ -51,15 +52,23 @@ trait Storage: Sized {
 }
 
 #[derive(Debug, Clone, Default)]
-struct RamStorage(HashMap<u64, Page>);
+struct RamStorage(Vec<Page>);
 
 impl Storage for RamStorage {
+    fn len(&self) -> Result<u64, anyhow::Error> {
+        Ok(self.0.len() as u64)
+    }
     fn get_page(&self, idx: u64) -> Result<Option<Page>, anyhow::Error> {
-        Ok(self.0.get(&idx).cloned())
+        Ok(self.0.get(idx as usize).cloned())
     }
     fn set_pages(&mut self, pages: Vec<(u64, Page)>) -> Result<(), anyhow::Error> {
+        if let Some(max_idx) = pages.iter().map(|(idx, _)| idx).max() {
+            if *max_idx >= self.0.len() as u64 {
+                self.0.resize(*max_idx as usize + 1, Page::default());
+            }
+        }
         for (idx, page) in pages {
-            self.0.insert(idx, page);
+            self.0[idx as usize] = page;
         }
         Ok(())
     }
@@ -70,6 +79,14 @@ struct FileStorage(File);
 use std::io::{Read, Seek, Write};
 
 impl Storage for FileStorage {
+    fn len(&self) -> Result<u64, anyhow::Error> {
+        let file_sz = self.0.metadata()?.len() as u64;
+        let page_sz = Page::default().0.len() as u64;
+        if file_sz % page_sz != 0 {
+            return Err(anyhow!("Invalid file length!"));
+        }
+        Ok(file_sz / page_sz)
+    }
     fn get_page(&self, idx: u64) -> Result<Option<Page>, anyhow::Error> {
         let mut file = &self.0;
         let offset = idx * 8192;
@@ -98,11 +115,20 @@ struct OverwrittenStorage<'a, S: Storage> {
 }
 
 impl<'a, S: Storage> Storage for OverwrittenStorage<'a, S> {
+    fn len(&self) -> Result<u64, anyhow::Error> {
+        let base_len = self.base.len()?;
+        let max_idx = self.overwrite.keys().max().copied().unwrap_or_default();
+        Ok(std::cmp::max(base_len, max_idx + 1))
+    }
     fn get_page(&self, idx: u64) -> Result<Option<Page>, anyhow::Error> {
+        if idx >= self.len()? {
+            return Ok(None);
+        }
+
         if let Some(overwrite) = self.overwrite.get(&idx) {
             Ok(Some(overwrite.clone()))
         } else {
-            self.base.get_page(idx)
+            Ok(Some(self.base.get_page(idx)?.unwrap_or_default()))
         }
     }
     fn set_pages(&mut self, pages: Vec<(u64, Page)>) -> Result<(), anyhow::Error> {
@@ -129,10 +155,14 @@ impl<'a, S: Storage> OverwrittenStorageMut<'a, S> {
 
 impl<'a, S: Storage> Storage for OverwrittenStorageMut<'a, S> {
     fn get_page(&self, idx: u64) -> Result<Option<Page>, anyhow::Error> {
+        if idx >= self.len()? {
+            return Ok(None);
+        }
+
         if let Some(overwrite) = self.overwrite.get(&idx) {
             Ok(Some(overwrite.clone()))
         } else {
-            self.base.get_page(idx)
+            Ok(Some(self.base.get_page(idx)?.unwrap_or_default()))
         }
     }
     fn set_pages(&mut self, pages: Vec<(u64, Page)>) -> Result<(), anyhow::Error> {
@@ -140,6 +170,11 @@ impl<'a, S: Storage> Storage for OverwrittenStorageMut<'a, S> {
             self.overwrite.insert(idx, page);
         }
         Ok(())
+    }
+    fn len(&self) -> Result<u64, anyhow::Error> {
+        let base_len = self.base.len()?;
+        let max_idx = self.overwrite.keys().max().copied().unwrap_or_default();
+        Ok(std::cmp::max(base_len, max_idx + 1))
     }
 }
 
@@ -390,6 +425,29 @@ impl<S: Storage> KvStore<S> {
         KvStore {
             storage: self.storage.fork_mut(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::{Page, RamStorage, Storage};
+
+    #[test]
+    fn test_ram_paging() {
+        let mut storage = RamStorage::default();
+        storage.set_pages(vec![(9, Page::default())]).unwrap();
+        assert_eq!(storage.len().unwrap(), 10);
+        assert_eq!(storage.get_page(5).unwrap(), Some(Page::default()));
+        assert_eq!(storage.get_page(15).unwrap(), None);
+
+        let mut fork = storage.fork_mut();
+        fork.set_pages(vec![(120, Page::default())]).unwrap();
+        assert_eq!(fork.len().unwrap(), 121);
+        assert_eq!(fork.get_page(50).unwrap(), Some(Page::default()));
+        assert_eq!(fork.get_page(125).unwrap(), None);
+
+        fork.commit().unwrap();
+        assert_eq!(storage.len().unwrap(), 121);
     }
 }
 
